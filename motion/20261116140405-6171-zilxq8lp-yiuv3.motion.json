@@ -1,0 +1,11 @@
+{
+  "v": 1,
+  "type": "motion-photo-merge",
+  "stillSource": "20261116140405-6171-zilxq8lp-yiuv3.src.jpg",
+  "videoSource": "20261116140405-6171-zilxq8lp-yiuv3.src.mp4",
+  "output": "20261116140405-6171-zilxq8lp-yiuv3.jpg",
+  "videoOffset": 7038480,
+  "videoLength": 5464928,
+  "presentationTimestampUs": null,
+  "createdAt": "2026-11-16T06:04:21.198Z"
+}
