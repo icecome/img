@@ -2,9 +2,19 @@
 #
 # ── 部署方法 ─────────────────────────────────────────────────────────────
 # 1. 把本文件复制到图床仓库（如 icecome/img）的 .github/workflows/motion-photo-transcode.yml
-# 2. 把 merge_motion_photo.py 复制到图床仓库根目录（与本 workflow 同仓）
+# 2. 把 merge_motion_photo.py 复制到图床仓库根目录（与本 workflow 同仓；
+#    建议连 merge_motion_photo.test.py 一起复制，让自检真正生效）
 # 3. push 即可。无需 Secrets：workflow 用仓库自带 GITHUB_TOKEN，但需在图床仓库
 #    Settings → Actions → General → Workflow permissions 设为「Read and write」。
+#
+# ── 2026-11-16 修复记录（RCA：60 次运行 0 产出的静默故障）──────────────────
+#   · GitHub 托管 runner（ubuntu-latest，22.04/24.04/26.04 镜像清单均无）不预装
+#     ffmpeg——旧版直接调 ffmpeg 以 exit 127 瞬时失败，被「单文件失败不中断整批」
+#     容错吞掉，整轮亮绿。现以 apt 显式安装（Ubuntu 官方源自带）。
+#   · merge 脚本此前从未被部署到图床仓库：脚本缺失时合成必然失败，现在显式
+#     置红而不是等每轮 cron 空转重试。
+#   · 转码结束 FAILED>0 时步骤 exit 1，让失败在 commit 状态上显形（源文件仍
+#     保留原地等下一轮重试，重试语义不变）。
 #
 # ── 与 CMS 的契约（改任一侧必须同步另一侧）──────────────────────────────
 #   · CMS 上传侧把 HEVC/AV1 动态照片拆为三件，落在 motion/ 子目录：
@@ -52,11 +62,25 @@ jobs:
         with:
           ref: ${{ github.ref }}
 
+      - name: Install ffmpeg
+        run: |
+          set -euo pipefail
+          # GitHub 托管 runner 的 ubuntu-latest 镜像【不】预装 ffmpeg（22.04/24.04/26.04
+          # 官方软件清单均无；此前「command not found」瞬时失败被容错吞掉，见头部修复记录）。
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -version | head -n 1
+
       - name: Self-test merge script
         run: |
           set -euo pipefail
           # 双端一致性自检：脚本与 TS 端（算法基准）行为必须一致。
           # 测试文件缺失时跳过（图床仓库可能只部署了脚本），不阻塞转码。
+          # 脚本本体缺失则是硬错误：没有它合成必然失败，不允许静默空转。
+          if [ ! -f merge_motion_photo.py ]; then
+            echo "::error::merge_motion_photo.py 未部署到图床仓库根目录——按部署方法第 2 步复制，否则所有待合成源将永久空转"
+            exit 1
+          fi
           if [ -f merge_motion_photo.test.py ]; then
             python3 merge_motion_photo.test.py
           else
@@ -65,6 +89,12 @@ jobs:
 
       - name: Transcode and merge pending sources
         run: |
+          # 注意：本步骤【有意】不使用 set -e（与 Self-test / Commit 步骤不同）。
+          # 循环里 ffmpeg / merge_motion_photo.py 都在 if 条件上下文中运行：
+          #   if ffmpeg ...; then ... else FAILED++ ; continue ...
+          # set -e 会让非零退出码的「失败单件」直接终止整个脚本，导致同批次其余
+          # 待转码文件被跳过、下次 cron 重复扫描同一失败文件——破坏「单文件失败
+          # 不中断整批」的重试语义。此处 fail-closed 由 if 分支显式承担。
           set -uo pipefail
           # 全仓扫描待转码源；产物已存在 → 跳过（幂等）
           PENDING=0
@@ -137,7 +167,14 @@ jobs:
             echo "::endgroup::"
           done
           echo "pending=${PENDING} failed=${FAILED}" >> "$GITHUB_STEP_SUMMARY"
-          # 不因个别失败而 fail：失败源文件保留，cron 下一轮自动重试
+          # 失败显形：单件失败不中断整批（循环已处理完所有文件，源文件保留原地，
+          # cron 下一轮自动重试——重试语义不变）；但批次结束后 FAILED>0 必须
+          # exit 1 让 commit 打红叉，否则 ffmpeg 缺失这类环境故障会以
+          # 「全绿 + 0 产出」静默存在（2026-11-16 RCA）。
+          if [ "${FAILED}" -gt 0 ]; then
+            echo "::error::${FAILED} 个源转码失败（源文件保留待重试），本轮无产出提交"
+            exit 1
+          fi
 
       - name: Commit outputs
         run: |
